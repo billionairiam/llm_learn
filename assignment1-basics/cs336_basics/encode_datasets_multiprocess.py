@@ -434,7 +434,7 @@ def main() -> None:
     parser.add_argument("--tinystories-merges", required=True)
     parser.add_argument(
         "--tinystories-output",
-        default="outputs/tinystories_train.npy",
+        default="outputs_tinystories/tinystories_train.npy",
         help="Output .npy path for TinyStories token ids.",
     )
     parser.add_argument(

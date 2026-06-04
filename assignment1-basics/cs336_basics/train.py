@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import random
 from pathlib import Path
@@ -10,15 +11,14 @@ import torch
 import torch.nn.functional as F
 
 
-# ====== 按你的项目实际路径修改这里 ======
 from cs336_basics.data_loading import get_batch
 from cs336_basics.checkpointing import save_checkpoint, load_checkpoint
 
-# 下面这几个名字按你自己的实现改
 from cs336_basics.transformer_lm import TransformerLM
 from cs336_basics.optimizer import AdamW
 from cs336_basics.learning_rate_schedule import get_lr_cosine_schedule
 from cs336_basics.gradient_clipping import gradient_clipping
+from cs336_basics.experiment_tracker import ExperimentTracker
 # ======================================
 
 
@@ -94,6 +94,8 @@ def train(args: argparse.Namespace) -> None:
         val_data = np.load(args.val_data, mmap_mode="r")
 
     model = build_model(args).to(device)
+    if args.compile:
+        model = torch.compile(model)
 
     # def check_model_parameters(model: torch.nn.Module) -> None:
     #     bad = False
@@ -165,6 +167,14 @@ def train(args: argparse.Namespace) -> None:
         )
         print(f"Resumed from checkpoint {args.resume_from}, iteration={start_iter}")
 
+    tracker = ExperimentTracker(
+        project=args.wandb_project,
+        run_name=args.run_name,
+        config=vars(args),
+        log_dir=args.log_dir,
+        use_wandb=args.use_wandb,
+    )
+
     model.train()
 
     for iteration in range(start_iter, args.max_iters):
@@ -205,10 +215,16 @@ def train(args: argparse.Namespace) -> None:
         optimizer.step()
 
         if iteration % args.log_every == 0:
+            log_metrics = {
+                "train_loss": loss.item(),
+                "lr": lr,
+            }
+            tracker.log(log_metrics, step=iteration)
             print(
                 f"iter={iteration} "
                 f"train_loss={loss.item():.4f} "
-                f"lr={lr:.6e}"
+                f"lr={lr:.6e} "
+                f"wall_time={tracker.wall_time:.1f}s"
             )
 
         if val_data is not None and iteration % args.eval_every == 0 and iteration > 0:
@@ -221,10 +237,17 @@ def train(args: argparse.Namespace) -> None:
                 eval_iters=args.eval_iters,
             )
 
+            val_metrics = {
+                "val_loss": val_loss,
+                "val_ppl": math.exp(val_loss),
+            }
+            tracker.log(val_metrics, step=iteration)
+
             print(
                 f"iter={iteration} "
                 f"val_loss={val_loss:.4f} "
-                f"val_ppl={math.exp(val_loss):.4f}"
+                f"val_ppl={math.exp(val_loss):.4f} "
+                f"wall_time={tracker.wall_time:.1f}s"
             )
 
         if iteration % args.save_every == 0 and iteration > 0:
@@ -252,9 +275,16 @@ def train(args: argparse.Namespace) -> None:
 
     print(f"Saved final checkpoint to {final_path}")
 
+    log_path = tracker.finish()
+    print(f"Experiment log saved to {log_path}")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--compile", action="store_true")
+    # config file (model hyperparams loaded from here first, CLI overrides)
+    parser.add_argument("--config", type=str, default="config/config.json", help="Path to model config JSON")
 
     # data
     parser.add_argument("--train-data", type=str, required=True)
@@ -264,14 +294,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     parser.add_argument("--resume-from", type=str, default=None)
 
-    # model
-    parser.add_argument("--vocab-size", type=int, required=True)
-    parser.add_argument("--context-length", type=int, default=256)
-    parser.add_argument("--d-model", type=int, default=512)
-    parser.add_argument("--num-layers", type=int, default=6)
-    parser.add_argument("--num-heads", type=int, default=8)
-    parser.add_argument("--d-ff", type=int, default=1344)
-    parser.add_argument("--rope-theta", type=float, default=10000.0)
+    # model (defaults are overridden by config.json when provided)
+    parser.add_argument("--vocab-size", type=int, default=None)
+    parser.add_argument("--context-length", type=int, default=None)
+    parser.add_argument("--d-model", type=int, default=None)
+    parser.add_argument("--num-layers", type=int, default=None)
+    parser.add_argument("--num-heads", type=int, default=None)
+    parser.add_argument("--d-ff", type=int, default=None)
+    parser.add_argument("--rope-theta", type=float, default=None)
 
     # optimizer
     parser.add_argument("--lr-max", type=float, default=3e-4)
@@ -298,7 +328,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seed", type=int, default=1337)
 
-    return parser.parse_args()
+    # experiment tracking
+    parser.add_argument("--use-wandb", action="store_true", help="Enable wandb logging")
+    parser.add_argument("--wandb-project", type=str, default="cs336")
+    parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--log-dir", type=str, default="logs")
+
+    args = parser.parse_args()
+
+    # Load model hyperparams from config JSON; CLI args take precedence.
+    config_path = Path(args.config)
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+        # Map config keys (snake_case) to argparse attr names
+        for key, value in config.items():
+            attr = key.replace("-", "_")
+            if hasattr(args, attr) and getattr(args, attr) is None:
+                setattr(args, attr, value)
+        print(f"Loaded model config from {config_path}")
+    else:
+        print(f"Warning: config file {config_path} not found, using CLI defaults")
+
+    # Validate required model params are set
+    for required in ("vocab_size", "context_length", "d_model", "num_layers", "num_heads", "d_ff", "rope_theta"):
+        if getattr(args, required, None) is None:
+            parser.error(f"--{required.replace('_', '-')} must be set via CLI or config file")
+
+    return args
 
 
 if __name__ == "__main__":
