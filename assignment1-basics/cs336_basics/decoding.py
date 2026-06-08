@@ -195,7 +195,8 @@ def main() -> None:
     parser.add_argument("--vocab", type=str, required=True)
     parser.add_argument("--merges", type=str, required=True)
 
-    parser.add_argument("--prompt", type=str, required=True)
+    parser.add_argument("--prompt", type=str, default=None, help="Prompt text (or use --prompt-file)")
+    parser.add_argument("--prompt-file", type=str, default=None, help="Read prompt from a file")
     parser.add_argument("--max-new-tokens", type=int, default=100)
 
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -205,6 +206,15 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda")
 
     args = parser.parse_args()
+
+    # Resolve prompt
+    if args.prompt_file is not None:
+        with open(args.prompt_file, encoding="utf-8") as f:
+            prompt = f.read().strip()
+    elif args.prompt is not None:
+        prompt = args.prompt
+    else:
+        parser.error("Must provide either --prompt or --prompt-file")
 
     if args.device == "cuda" and not torch.cuda.is_available():
         print("CUDA is not available, using CPU instead.")
@@ -224,6 +234,8 @@ def main() -> None:
 
     checkpoint = torch.load(args.checkpoint, map_location=device)
     state_dict = get_state_dict(checkpoint)
+    # Strip _orig_mod. prefix added by torch.compile
+    state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict)
 
     model.to(device)
@@ -234,7 +246,7 @@ def main() -> None:
     output = generate(
         model=model,
         tokenizer=tokenizer,
-        prompt=args.prompt,
+        prompt=prompt,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,

@@ -422,7 +422,15 @@ def encode_one_dataset(
         eot_token=eot_token,
         limit_docs=limit_docs,
     )
-
+# uv run encode_datasets_multiprocess.py \
+# --tinystories-data /home/maliang/llm_learn/data/TinyStoriesV2-GPT4-valid.txt \
+# --tinystories-vocab /home/maliang/llm_learn/assignment1-basics/cs336_basics/outputs_tinystories/tinystories_vocab.txt \
+# --tinystories-merges /home/maliang/llm_learn/assignment1-basics/cs336_basics/outputs_tinystories/tinystories_merges.txt
+# --tinystories-output outputs_tinystories/tinystories_val.npy \
+# --owt-data /home/maliang/llm_learn/data/owt_valid.txt \
+# --owt-vocab /home/maliang/llm_learn/assignment1-basics/cs336_basics/outputs_owt/owt_vocab.txt \
+# --owt-merges /home/maliang/llm_learn/assignment1-basics/cs336_basics/outputs_owt/owt_merges.txt \
+# --owt-output outputs_owt/owt_val.npy
 
 def main() -> None:
     parser = argparse.ArgumentParser(

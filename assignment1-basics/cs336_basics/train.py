@@ -82,7 +82,7 @@ def estimate_loss(
     return sum(losses) / len(losses)
 
 
-def train(args: argparse.Namespace) -> None:
+def train(args: argparse.Namespace) -> dict:
     set_seed(args.seed)
 
     device = args.device
@@ -214,6 +214,14 @@ def train(args: argparse.Namespace) -> None:
 
         optimizer.step()
 
+        # Detect divergence (NaN/Inf or loss spike)
+        loss_val = loss.item()
+        if not math.isfinite(loss_val) or loss_val > 100.0:
+            print(f"DIVERGED at iter={iteration} (loss={loss_val})")
+            tracker.log({"train_loss": loss_val, "lr": lr, "diverged": 1}, step=iteration)
+            log_path = tracker.finish()
+            return {"log_path": str(log_path), "records": tracker._records, "diverged": True}
+
         if iteration % args.log_every == 0:
             log_metrics = {
                 "train_loss": loss.item(),
@@ -275,8 +283,29 @@ def train(args: argparse.Namespace) -> None:
 
     print(f"Saved final checkpoint to {final_path}")
 
+    # Final validation evaluation
+    final_val_loss = None
+    if val_data is not None:
+        final_val_loss = estimate_loss(
+            model=model,
+            dataset=val_data,
+            batch_size=args.batch_size,
+            context_length=args.context_length,
+            device=device,
+            eval_iters=args.eval_iters,
+        )
+        tracker.log({"val_loss": final_val_loss, "val_ppl": math.exp(final_val_loss)}, step=args.max_iters)
+        print(f"Final val_loss={final_val_loss:.4f}  val_ppl={math.exp(final_val_loss):.4f}")
+
     log_path = tracker.finish()
     print(f"Experiment log saved to {log_path}")
+
+    return {
+        "log_path": str(log_path),
+        "records": tracker._records,
+        "diverged": False,
+        "final_val_loss": final_val_loss,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -313,8 +342,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
 
     # schedule
-    parser.add_argument("--warmup-iters", type=int, default=1000)
-    parser.add_argument("--cosine-cycle-iters", type=int, default=10000)
+    parser.add_argument("--warmup-iters", type=int, default=500)
+    parser.add_argument("--cosine-cycle-iters", type=int, default=None,
+                        help="Cosine decay cycle length (default: same as --max-iters)")
 
     # training
     parser.add_argument("--batch-size", type=int, default=32)
@@ -354,6 +384,10 @@ def parse_args() -> argparse.Namespace:
     for required in ("vocab_size", "context_length", "d_model", "num_layers", "num_heads", "d_ff", "rope_theta"):
         if getattr(args, required, None) is None:
             parser.error(f"--{required.replace('_', '-')} must be set via CLI or config file")
+
+    # Default cosine_cycle_iters to max_iters so decay ends exactly at training end
+    if args.cosine_cycle_iters is None:
+        args.cosine_cycle_iters = args.max_iters
 
     return args
 
